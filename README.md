@@ -1,297 +1,180 @@
-# MovieDemo Swift — iOS
+# MovieDemo Swift v2
 
-This v2 training copy has its own app identifier (`com.armando.moviedemo.swift.v2`)
-and Home Screen name (`MovieDemo v2`), so it can be installed beside the original.
-See [TRAINING_PLAN.md](TRAINING_PLAN.md) for the interview practice sequence.
-See [ARCHITECTURE_TRAINING.md](ARCHITECTURE_TRAINING.md) for the new MVVM,
-Dependencies, Combine, RxSwift, and RIBs exercises.
+I come from the .NET MAUI world, where I usually ask a very specific question
+when the UI changes: **which value changed, who published it, and which control
+reacted?** I built this small iOS movie app to answer the same question in
+SwiftUI while getting my hands on UIKit, Combine, and a few architecture
+patterns I wanted to understand better.
 
-This is my iOS version of MovieDemo. I used it to practice Swift, SwiftUI, structured concurrency, native iOS navigation, SQLite, and MVVM while matching the same behavior as the Kotlin and .NET MAUI versions.
+The app browses movies from [TMDB](https://www.themoviedb.org), saves favorites
+on the device, and gives me a real screen to test these ideas. The RxSwift and
+Uber RIBs examples live in separate packages so I can compare them without
+turning the main app into an architecture buffet.
 
-I kept the app small and used Apple frameworks directly where possible. The UI is simple on purpose so the code is easier to follow and discuss.
+## What can you try?
 
-## What the app does
+- Browse popular movies, with more pages loaded as you reach the end.
+- Search **titles already loaded** in the list. Combine waits 250 ms after
+  typing before it filters the rows.
+- Open a movie, read its overview, and add or remove it from Favorites.
+- Play a matching Apple movie preview when one is available, or open a TMDB
+  YouTube trailer link when direct playback is unavailable.
+- Share a movie through the native iOS share sheet.
 
-- Calls the TMDB REST API with `URLSession` and bearer authentication.
-- Loads popular movies page by page.
-- Filters already loaded movie titles with a debounced Combine search field.
-- Displays poster, title, release year, and rating in a SwiftUI `List`.
-- Uses `AsyncImage` for poster thumbnails and an SF Symbol placeholder.
-- Uses a native `TabView` for Movies and Favorites.
-- Uses a `NavigationStack` and `NavigationLink` for Movie Details.
-- Saves complete favorite records with SQLite3.
-- Saves the selected tab and last successful page in a JSON file.
-- Plays exact Apple movie previews with `AVPlayer` and SwiftUI `VideoPlayer`.
-- Opens the selected TMDB YouTube trailer externally when direct media is unavailable.
-- Shares a movie's title and overview through a UIKit activity sheet from Movie Details.
-- Shows clear loading, retry, empty, unavailable, and error states.
+The main app has three screens: Movies, Favorites, and Movie Details. It uses
+its own bundle ID and Home Screen name, so it can sit beside the original
+MovieDemo on the same simulator.
 
-The app has three pages only: Movies, Favorites, and Movie Details.
+## Why these pieces?
 
-## Requirements
+### MVVM, with the values in plain sight
 
-- macOS with Xcode installed.
-- iOS 17.0 or newer as the deployment target.
-- An iOS simulator or configured physical iPhone.
-- A TMDB API Read Access Token for live movie and YouTube-trailer requests. Follow [API Token Setup](API_TOKEN_SETUP.md).
+`MoviesViewModel` is `@MainActor` isolated. When a page arrives, it assigns
+`movies`, `currentPage`, and `totalPages`. The Combine search pipeline combines
+`movies` with `searchText` and publishes `visibleMovies`. The SwiftUI `List`
+reads `visibleMovies` and uses each movie's ID to identify its rows.
 
-The main app uses Apple's SwiftUI, UIKit, Foundation, AVKit, Combine, and SQLite3
-frameworks plus Point-Free's `Dependencies` package (pinned to 1.16.0).
-RxSwift and Uber RIBs are confined to separate architecture exercises.
+That is the same kind of cause-and-effect trail I look for in MAUI: a ViewModel
+property changes, the bound UI is notified, and a specific control updates.
+Loading, empty, content, and error cases are separate; a failed next page
+keeps the rows I already have and offers Retry.
 
-## App icon
+### Dependency injection, one feature at a time
 
-The iOS app icon uses a Swift-inspired ribbon bird and movie play symbol above the exact `SWIFT` label. The 1024×1024 source master is stored at `branding/app-icon-master.png`, and the compiled application asset is `MovieDemoSwift/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png`.
+<img src="docs/media/movie-feed.gif" width="320" alt="MovieDemo loading the live Movies feed through MovieFeedClient">
 
-The project sets `ASSETCATALOG_COMPILER_APPICON_NAME` to `AppIcon`. The artwork is full bleed and does not contain baked-in rounded corners; iOS applies the correct system mask.
+The Movies feed uses [Point-Free Dependencies](https://github.com/pointfreeco/swift-dependencies)
+for `MovieFeedClient`. It has a live TMDB implementation, a preview movie, and
+a test value that makes a missing override obvious. In tests, I replace it
+with a fake using `withDependencies`.
 
-## Project structure
+Details and Favorites still receive repository protocols from `AppContainer`.
+I kept this change narrow so it is easy to see what the dependency library
+adds.
 
-```text
-MovieDemo_v2/
-├── Configuration/              Build and local secret configuration
-├── MovieDemoSwift/
-│   ├── Core/                   Models, protocols, and pure policies
-│   ├── Data/                   REST, Apple Search, SQLite, JSON, and feed client
-│   ├── Presentation/           ObservableObject ViewModels
-│   └── App/                    SwiftUI views, UIKit share sheet, navigation, DI, and player
-├── MovieDemoSwiftTests/        XCTest unit tests
-├── ArchitectureExercises/     Separate RxSwift and Uber RIBs Swift packages
-├── MovieDemoSwift.xcodeproj
-└── generate_xcode_project.rb   Recreates the project definition if needed
-```
+### Combine for typing; async/await for requests
 
-### Core
+<img src="docs/media/combine-search.gif" width="320" alt="Searching for Dark filters the loaded movie list; clearing the search restores it">
 
-Core contains Swift types that do not depend on SwiftUI:
+Search is an ongoing stream of text edits, so `$searchText` is a useful
+`Publisher`. It goes through `debounce`, duplicate removal, and title
+filtering before `sink` assigns `visibleMovies`. An `AnyCancellable` keeps
+the subscription alive for the ViewModel's lifetime.
 
-- `Movie`, `MoviePage`, `AppState`, and trailer models;
-- repository protocols for movies, previews, favorites, and app state;
-- `MoviePolicies` for deduplication, pagination, and release-year formatting;
-- `TrailerPolicy` for direct-preview matching and YouTube fallback selection.
+The TMDB calls, trailer lookup, and SQLite work are one-shot operations, so
+they stay on `async`/`await`. I do not send network or database work through a
+SwiftUI View.
 
-### Data
+### UIKit where it makes sense
 
-Data provides the concrete protocol implementations:
+<img src="docs/media/uikit-share.gif" width="320" alt="Opening and dismissing the native UIKit share sheet from Movie Details">
 
-- `TmdbMovieRepository` uses `URLSession`, `URLComponents`, and `JSONDecoder`.
-- `AppleTrailerRepository` searches Apple's public API and maps optional response fields safely.
-- `SQLiteFavoriteRepository` is an actor around the native SQLite3 C API.
-- `JSONAppStateRepository` stores a Codable JSON document in Application Support.
+Movie Details presents `UIActivityViewController` through
+`UIViewControllerRepresentable`. SwiftUI owns the share button and whether
+the sheet is open; UIKit provides the native sharing controller.
 
-### Presentation
+Favorites are stored with SQLite3 inside an actor. A small JSON repository
+remembers the selected tab and last successful page. Movie previews use
+`AVPlayer` and SwiftUI's `VideoPlayer`.
 
-The Presentation group contains three `@MainActor` ViewModels:
+## The side exercises
 
-- `MoviesViewModel` owns pagination, loading/error state, and debounced local search.
-- `FavoritesViewModel` reads saved favorites.
-- `MovieDetailsViewModel` checks favorite state, selects trailer behavior, and updates favorites.
+I wanted to compare the same ideas without running two search pipelines or
+two navigation architectures in the app:
 
-### App
+| Exercise | What I am practicing |
+| --- | --- |
+| [RxSearch](ArchitectureExercises/RxSearch) | An isolated version of title search with `Observable`, `debounce`, a supplied scheduler, `subscribe`, and `DisposeBag`. |
+| [RIBsMovies](ArchitectureExercises/RIBsMovies) | A small Movies → Details tree with Uber RIBs Builder, Interactor, and Router. The test checks child attach and detach. |
 
-The App group contains:
+[ARCHITECTURE_TRAINING.md](ARCHITECTURE_TRAINING.md) walks through those
+examples with more detail and maps them back to my MAUI mental model. The
+original step-by-step practice plan is in [TRAINING_PLAN.md](TRAINING_PLAN.md).
 
-- SwiftUI screens and reusable row/layout views;
-- `RootView`, which owns tabs and two navigation stacks;
-- `AppContainer`, which creates the Details/Favorites repositories;
-- the native `AVPlayer` controller and `VideoPlayer` view.
+## Let's run it
 
-## How MVVM works here
+You need macOS, Xcode with Swift 6.1 or newer, and an iPhone simulator. The
+deployment target is iOS 17.0; I validated the project with Xcode 26.5 and
+an iPhone 17 Pro simulator.
 
-The SwiftUI views do not create network requests or SQL statements. They call ViewModel functions and display published state.
-
-```text
-SwiftUI action or .task
-        │
-        ▼
-@MainActor ViewModel
-        │
-        ▼
-MovieFeedClient or repository protocol
-        │
-        ▼
-URLSession / SQLite actor / JSON repository
-        │
-        ▼
-@Published property ───> SwiftUI refresh
-```
-
-`@StateObject` gives each page ownership of its ViewModel. `@Published private(set)` lets the page observe values without mutating them directly.
-
-## UIKit interoperability
-
-Movie Details presents `UIActivityViewController` through a small
-`UIViewControllerRepresentable` wrapper. SwiftUI owns the button and sheet
-state; UIKit supplies the native sharing interface. The shared message contains
-the movie title and overview when available. This provides a focused example
-of using UIKit inside an existing SwiftUI screen.
-
-## Swift concepts I practiced
-
-### Structured concurrency
-
-REST and database protocols use `async throws`. Movie Details starts three independent operations with `async let`:
-
-- check whether the movie is a favorite;
-- look for an exact Apple preview;
-- request TMDB video candidates.
-
-The ViewModel awaits each result and applies a clear priority: direct preview, external YouTube fallback, provider error, then unavailable.
-
-### `@MainActor`
-
-ViewModels are marked `@MainActor` because their published properties drive the UI. This keeps observable state changes on the main actor while `URLSession` and the SQLite actor perform their own asynchronous work.
-
-### Actors
-
-`SQLiteFavoriteRepository` is an actor. Actor isolation protects the shared SQLite handle from concurrent access. SQL statements use `defer` to finalize prepared statements even when a method exits early.
-
-### Protocols and dependency injection
-
-Details and Favorites receive repository protocols from `AppContainer`.
-The Movies feed instead reads `MovieFeedClient` through Point-Free's
-`@Dependency`. Its live implementation calls TMDB; preview and test values
-are separate. Tests override the client with `withDependencies`.
-
-### Codable
-
-TMDB models use `CodingKeys` to map snake_case JSON fields such as `poster_path` and `vote_average` to Swift property names. `AppState` is also Codable, so the JSON repository can encode and decode it directly.
-
-### Explicit trailer state
-
-`TrailerPlaybackState` is an enum with associated values for playable media, external URLs, and failures. A SwiftUI `switch` handles every state, which is safer than coordinating several unrelated Boolean properties.
-
-### Pure synchronous policies
-
-Small deterministic rules stay synchronous:
-
-- movie-ID deduplication;
-- release-year formatting;
-- pagination eligibility;
-- poster URL construction;
-- normalized title matching;
-- HTTPS validation;
-- preferred YouTube candidate selection.
-
-They are fast, do not need an actor, and are easy to test with XCTest.
-
-## Three-region layout
-
-`ThreeRegionPage<Header, Page, Footer>` is a generic SwiftUI view that uses `@ViewBuilder` closures:
-
-```text
-VStack
-├── HeaderContent       intrinsic height
-├── PageContent         fills available space
-└── FooterContent       intrinsic height
-```
-
-Each region has its own visibility property. The native `TabView` remains in `RootView`, outside the page layout.
-
-## Navigation
-
-- `TabView` supplies the native Movies and Favorites tabs with `film` and `star` SF Symbols.
-- Each tab owns its own `NavigationStack`, so forward/back history remains local to that tab.
-- Movie rows use `NavigationLink(value:)`.
-- `.navigationDestination(for: Movie.self)` creates Movie Details.
-- The system Back button returns to the originating tab stack.
-
-This is the standard SwiftUI composition for the two required navigation styles.
-
-## Pagination behavior
-
-Each visible row starts a small `.task` that reports its index. `MoviePolicies.shouldLoadNextPage` returns true only near the final three items, when another page exists and no request is running.
-
-`MoviesViewModel` appends unique TMDB IDs, preserves existing content on a failed next-page request, records the successful page in JSON, and exposes Retry.
-
-## Persistence
-
-The app creates this directory in Application Support:
-
-```text
-Application Support/MovieDemo/
-├── movie-demo.sqlite
-└── movie-demo-app-state.json
-```
-
-### SQLite favorites
-
-The native SQLite3 repository creates `favorite_movies` and stores all movie fields needed by Favorites. Prepared statements bind user data rather than building SQL strings from movie values.
-
-### JSON app state
-
-The JSON repository stores the selected root tab and last successful page. It uses an `NSLock` and atomic file writes. Missing or invalid data returns the default `AppState`.
-
-The JSON file is intentionally read synchronously because it is very small and local. REST and SQLite operations use async APIs because they can take longer.
-
-## Trailer playback
-
-1. `AppleTrailerRepository` builds a search URL with `URLComponents` and `URLQueryItem`.
-2. `JSONDecoder` maps the response into optional candidate fields.
-3. `TrailerPolicy` accepts only an HTTPS `feature-movie` result with the same normalized title and release year.
-4. `NativeTrailerPlayerController` loads the URL into `AVPlayer`.
-5. SwiftUI `VideoPlayer` provides native playback controls.
-6. Playback does not autoplay.
-7. `onDisappear` pauses the player, removes its item, and releases the current source.
-8. If no direct preview matches, a SwiftUI `Link` opens the selected TMDB YouTube trailer externally.
-
-No WebView is used.
-
-## Build, test, and run
-
-Open `MovieDemoSwift.xcodeproj`, select the `MovieDemoSwift` scheme and an iPhone simulator, then Run or Test.
-
-Command-line test example:
+1. Clone this repository and open `MovieDemoSwift.xcodeproj`.
+2. Get a TMDB **API Read Access Token** from your
+   [TMDB API settings](https://www.themoviedb.org/settings/api).
+3. Copy `Configuration/Secrets.example.xcconfig` to
+   `Configuration/Secrets.xcconfig`, then replace the placeholder with your
+   token. [API_TOKEN_SETUP.md](API_TOKEN_SETUP.md) has the exact steps.
+4. Select the `MovieDemoSwift` scheme and run it on an iPhone simulator.
+
+The app builds without the token, but live TMDB calls show a configuration
+error. The tests use fakes, so they do not need a token.
+
+### Run the tests
+
+From the repository root:
 
 ```sh
 xcodebuild -project MovieDemoSwift.xcodeproj -scheme MovieDemoSwift \
-  -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.5' test \
-  CODE_SIGNING_ALLOWED=NO
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.5' \
+  test CODE_SIGNING_ALLOWED=NO
 ```
 
-Current main-app unit result: **18 passed, 0 failed**.
-
-The tests cover:
-
-- movie-ID deduplication;
-- pagination eligibility;
-- preferred YouTube selection;
-- exact Apple preview matching;
-- insecure preview rejection;
-- YouTube URL creation;
-- Apple response mapping;
-- Apple search URL construction;
-- JSON app-state round trip;
-- compact poster URL construction.
-- pending-load, first load, pagination, retry, empty/error behavior, favorite changes, and
-  debounced search through fake clients/repositories.
-
-The app was runtime-validated on an iPhone 17 Pro simulator, including posters, tab icons, push navigation, direct AVPlayer playback, external fallback, and player cleanup when navigating back.
-
-If the Xcode project file needs to be recreated after adding source files, run:
+Use another installed simulator name and OS if yours differ. For the
+separate exercises:
 
 ```sh
-ruby generate_xcode_project.rb
+cd ArchitectureExercises/RxSearch
+swift test
 ```
 
-Do not regenerate the project during normal builds.
+```sh
+cd ArchitectureExercises/RIBsMovies
+xcodebuild -scheme RIBsMoviesExercise \
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.5' \
+  test CODE_SIGNING_ALLOWED=NO
+```
 
-## Manual check list
+My last local check on 2026-10-30 passed **18 main-app tests**, **1 RxSwift
+test**, and **1 RIBs test**. I also checked the live feed, posters, and local
+title search in the simulator.
 
-- Movies shows loading and then poster rows.
-- Scrolling near the end requests one additional page.
-- Typing a title filters loaded movies after a short debounce; clearing it restores the list.
-- A failed request keeps existing rows and exposes Retry.
-- Both tab icons appear and switching tabs persists the selected tab.
-- A movie pushes Details and the system Back button returns correctly.
-- Add/Remove Favorite updates the button and Favorites list.
-- A matching Apple preview plays with native controls.
-- Leaving Details stops and releases the current player item.
-- A movie without a matching preview displays the external YouTube option.
+## What I would avoid
 
-## What I would improve next
+- **Treating local search as a full TMDB search.** It filters only movie
+  titles already loaded into `MoviesViewModel`.
+- **Calling the local token a production secret.** `Secrets.xcconfig` is
+  ignored by Git, but its value is embedded in a local app build. I would put
+  a backend between a distributed app and third-party credentials.
+- **Assuming every trailer will play inside the app.** The Apple preview
+  needs a matching title and year; otherwise the app offers an external
+  YouTube link when TMDB provides one.
+- **Claiming the side exercises are the app architecture.** RxSwift and RIBs
+  are isolated practice packages. The working app uses MVVM and Combine.
 
-For a production iOS app, I would add UI tests, broader ViewModel coverage,
-accessibility verification, localization, a SQLite migration strategy, offline
-feed caching, retry/backoff rules, and a backend for protecting third-party
-credentials. These remain outside this interview demo.
+There is still room for UI tests, accessibility verification, localization,
+offline caching, retry/backoff rules, and a SQLite migration strategy. That
+is future work for this practice project.
+
+## Project map
+
+```text
+MovieDemoSwift/
+├── App/            SwiftUI screens, navigation, UIKit share sheet, player
+├── Core/           Models, repository protocols, pure policies
+├── Data/           TMDB and Apple clients, SQLite, JSON, feed dependency
+└── Presentation/   @MainActor ViewModels
+MovieDemoSwiftTests/  App and ViewModel tests
+ArchitectureExercises/
+├── RxSearch/        Isolated RxSwift package and test
+└── RIBsMovies/      Isolated Uber RIBs package and test
+Configuration/       Build settings and ignored local token
+```
+
+The app icon source is in [branding](branding). The repository is available
+under the [MIT License](LICENSE).
+
+## Credits
+
+Movie data and posters come from [The Movie Database (TMDB)](https://www.themoviedb.org).
+This product uses the TMDB API but is not endorsed or certified by TMDB.
+Before distributing the app, I would add TMDB's required in-app About/Credits
+attribution and approved logo, as described in the [TMDB FAQ](https://developer.themoviedb.org/docs/faq).
