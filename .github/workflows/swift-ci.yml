@@ -1,0 +1,112 @@
+name: Swift CI
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: swift-ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  swift-ci:
+    name: Swift build and tests
+    # Standard hosted runners are free for this public repository.
+    if: github.repository == 'Cacata/MovieDemo_Swift_v2' && github.event.repository.private == false
+    runs-on: macos-26
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer
+      SIMULATOR_DESTINATION: platform=iOS Simulator,name=iPhone 17 Pro,OS=26.5
+
+    steps:
+      - name: Check out the PR merge commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Verify toolchain and record provenance
+        id: prepare
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          xcodebuild -version | tee "$RUNNER_TEMP/xcode-version.txt"
+          grep -Fx 'Xcode 26.5' "$RUNNER_TEMP/xcode-version.txt"
+          xcrun swift --version
+          xcrun simctl list devices available
+          {
+            printf 'Tested merge commit: %s\n' "$(git rev-parse HEAD)"
+            printf 'PR head: %s\n' "$PR_HEAD_SHA"
+            printf 'PR base: %s\n' "$PR_BASE_SHA"
+            printf 'Runner image: %s %s\n' "$ImageOS" "$ImageVersion"
+            printf 'Destination: %s\n' "$SIMULATOR_DESTINATION"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Build and test the app
+        id: app
+        if: ${{ !cancelled() && steps.prepare.outcome == 'success' }}
+        timeout-minutes: 20
+        run: |
+          xcodebuild -project MovieDemoSwift.xcodeproj -scheme MovieDemoSwift \
+            -destination "$SIMULATOR_DESTINATION" \
+            -derivedDataPath "$RUNNER_TEMP/app-derived" \
+            -resultBundlePath "$RUNNER_TEMP/app-tests.xcresult" \
+            -onlyUsePackageVersionsFromResolvedFile \
+            -parallel-testing-enabled NO \
+            -test-timeouts-enabled YES \
+            -default-test-execution-time-allowance 60 \
+            -maximum-test-execution-time-allowance 120 \
+            test CODE_SIGNING_ALLOWED=NO TMDB_READ_ACCESS_TOKEN= \
+            2>&1 | tee "$RUNNER_TEMP/app-tests.log"
+
+      - name: Build and test RxSearch
+        id: rxsearch
+        if: ${{ !cancelled() && steps.prepare.outcome == 'success' }}
+        timeout-minutes: 10
+        run: |
+          swift test --package-path ArchitectureExercises/RxSearch \
+            --scratch-path "$RUNNER_TEMP/rxsearch-build" \
+            --force-resolved-versions \
+            2>&1 | tee "$RUNNER_TEMP/rxsearch-tests.log"
+
+      - name: Build and test RIBsMovies
+        id: ribs
+        if: ${{ !cancelled() && steps.prepare.outcome == 'success' }}
+        timeout-minutes: 15
+        working-directory: ArchitectureExercises/RIBsMovies
+        run: |
+          xcodebuild -scheme RIBsMoviesExercise \
+            -destination "$SIMULATOR_DESTINATION" \
+            -derivedDataPath "$RUNNER_TEMP/ribs-derived" \
+            -resultBundlePath "$RUNNER_TEMP/ribs-tests.xcresult" \
+            -onlyUsePackageVersionsFromResolvedFile \
+            -parallel-testing-enabled NO \
+            -test-timeouts-enabled YES \
+            -default-test-execution-time-allowance 60 \
+            -maximum-test-execution-time-allowance 120 \
+            test CODE_SIGNING_ALLOWED=NO \
+            2>&1 | tee "$RUNNER_TEMP/ribs-tests.log"
+
+      - name: Summarize suite outcomes
+        if: ${{ always() }}
+        env:
+          PREPARE_RESULT: ${{ steps.prepare.outcome }}
+          APP_RESULT: ${{ steps.app.outcome }}
+          RXSEARCH_RESULT: ${{ steps.rxsearch.outcome }}
+          RIBS_RESULT: ${{ steps.ribs.outcome }}
+        run: |
+          {
+            printf '\n| Stage | Result |\n| --- | --- |\n'
+            printf '| Toolchain | %s |\n' "$PREPARE_RESULT"
+            printf '| App | %s |\n' "$APP_RESULT"
+            printf '| RxSearch | %s |\n' "$RXSEARCH_RESULT"
+            printf '| RIBsMovies | %s |\n' "$RIBS_RESULT"
+            printf '\nTest counts and failures are in each step log.\n'
+          } >> "$GITHUB_STEP_SUMMARY"
