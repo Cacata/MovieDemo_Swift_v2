@@ -13,12 +13,14 @@ enum TrailerPlaybackState: Equatable {
 final class MovieDetailsViewModel: ObservableObject {
     let movie: Movie
     @Published private(set) var isFavorite = false
+    @Published private(set) var isUpdatingFavorite = false
     @Published private(set) var trailerPlaybackState: TrailerPlaybackState = .idle
     @Published private(set) var errorMessage: String?
 
     private let movieRepository: MovieRepository
     private let trailerRepository: TrailerRepository
     private let favoriteRepository: FavoriteRepository
+    private var favoriteWriteRevision = 0
 
     init(
         movie: Movie,
@@ -40,15 +42,22 @@ final class MovieDetailsViewModel: ObservableObject {
         let selectedMovieRepository = movieRepository
         let selectedTrailerRepository = trailerRepository
         let selectedFavoriteRepository = favoriteRepository
+        let favoriteReadRevision = favoriteWriteRevision
 
         async let favoriteResult = selectedFavoriteRepository.isFavorite(movieID: selectedMovie.id)
         async let playableTrailerResult = selectedTrailerRepository.playableTrailer(for: selectedMovie)
         async let youtubeTrailerKeyResult = selectedMovieRepository.trailerKey(movieID: selectedMovie.id)
 
         do {
-            isFavorite = try await favoriteResult
+            let loadedIsFavorite = try await favoriteResult
+            // A write may have completed while this read was suspended.
+            if favoriteReadRevision == favoriteWriteRevision && !isUpdatingFavorite {
+                isFavorite = loadedIsFavorite
+            }
         } catch {
-            errorMessage = error.localizedDescription
+            if favoriteReadRevision == favoriteWriteRevision && !isUpdatingFavorite {
+                errorMessage = error.localizedDescription
+            }
         }
 
         var playableTrailer: TrailerMedia?
@@ -80,14 +89,19 @@ final class MovieDetailsViewModel: ObservableObject {
     }
 
     func toggleFavorite() async {
+        guard !isUpdatingFavorite else { return }
+        isUpdatingFavorite = true
+        defer { isUpdatingFavorite = false }
+        let shouldBeFavorite = !isFavorite
         errorMessage = nil
         do {
-            if isFavorite {
-                try await favoriteRepository.removeFavorite(movieID: movie.id)
-            } else {
+            if shouldBeFavorite {
                 try await favoriteRepository.saveFavorite(movie)
+            } else {
+                try await favoriteRepository.removeFavorite(movieID: movie.id)
             }
-            isFavorite.toggle()
+            favoriteWriteRevision += 1
+            isFavorite = shouldBeFavorite
         } catch {
             errorMessage = error.localizedDescription
         }

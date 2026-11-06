@@ -1,4 +1,5 @@
 import XCTest
+import SQLite3
 @testable import MovieDemoSwift
 
 final class MoviePoliciesTests: XCTestCase {
@@ -153,6 +154,37 @@ final class MoviePoliciesTests: XCTestCase {
 
         XCTAssertEqual(movieWithPoster.posterURL?.absoluteString, "https://image.tmdb.org/t/p/w185/poster.jpg")
         XCTAssertNil(movieWithoutPoster.posterURL)
+    }
+
+    func testLockedSQLiteReadReportsFailureInsteadOfEmptyFavorites() async throws {
+        let databaseURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("movie-demo-locked-\(UUID().uuidString).sqlite")
+        defer { try? FileManager.default.removeItem(at: databaseURL) }
+        let repository = try SQLiteFavoriteRepository(databaseURL: databaseURL)
+        try await repository.saveFavorite(movie(id: 1, title: "Saved"))
+        let savedFavorites = try await repository.favorites()
+        XCTAssertEqual(savedFavorites.count, 1)
+
+        var lockingConnection: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(databaseURL.path, &lockingConnection), SQLITE_OK)
+        guard let lockingConnection else {
+            XCTFail("Could not open the locking SQLite connection")
+            return
+        }
+        defer {
+            sqlite3_exec(lockingConnection, "ROLLBACK", nil, nil, nil)
+            sqlite3_close(lockingConnection)
+        }
+        XCTAssertEqual(sqlite3_exec(lockingConnection, "BEGIN EXCLUSIVE", nil, nil, nil), SQLITE_OK)
+
+        do {
+            let favorites = try await repository.favorites()
+            XCTFail("Locked read returned \(favorites.count) rows instead of reporting an error")
+        } catch SQLiteFavoriteError.readFailed(let code) {
+            XCTAssertTrue(code == SQLITE_BUSY || code == SQLITE_LOCKED, "Unexpected SQLite read error: \(code)")
+        } catch {
+            XCTFail("Expected a locked-read error, got \(error)")
+        }
     }
 
     private func movie(id: Int, title: String) -> Movie {

@@ -20,7 +20,10 @@ struct RootView: View {
             NavigationStack {
                 FavoritesPage(container: container)
             }
-            .tabItem { Label("Favorites", systemImage: "star") }
+            .tabItem {
+                Label("Favorites", systemImage: "star")
+                    .accessibilityIdentifier("tabs.favorites")
+            }
             .tag(RootTab.favorites)
         }
         .onChange(of: selectedTab) { _, newTab in

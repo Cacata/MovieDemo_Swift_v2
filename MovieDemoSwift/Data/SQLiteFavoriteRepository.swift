@@ -40,7 +40,8 @@ actor SQLiteFavoriteRepository: FavoriteRepository {
         defer { sqlite3_finalize(statement) }
 
         var movies: [Movie] = []
-        while sqlite3_step(statement) == SQLITE_ROW {
+        var result = sqlite3_step(statement)
+        while result == SQLITE_ROW {
             movies.append(
                 Movie(
                     id: Int(sqlite3_column_int64(statement, 0)),
@@ -52,7 +53,9 @@ actor SQLiteFavoriteRepository: FavoriteRepository {
                     voteAverage: sqlite3_column_double(statement, 6)
                 )
             )
+            result = sqlite3_step(statement)
         }
+        guard result == SQLITE_DONE else { throw SQLiteFavoriteError.readFailed(code: result) }
         return movies
     }
 
@@ -63,7 +66,14 @@ actor SQLiteFavoriteRepository: FavoriteRepository {
         }
         defer { sqlite3_finalize(statement) }
         sqlite3_bind_int64(statement, 1, sqlite3_int64(movieID))
-        return sqlite3_step(statement) == SQLITE_ROW
+        switch sqlite3_step(statement) {
+        case SQLITE_ROW:
+            return true
+        case SQLITE_DONE:
+            return false
+        case let result:
+            throw SQLiteFavoriteError.readFailed(code: result)
+        }
     }
 
     func saveFavorite(_ movie: Movie) async throws {
@@ -125,7 +135,19 @@ private final class SQLiteHandle: @unchecked Sendable {
 
 private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
-enum SQLiteFavoriteError: Error {
+enum SQLiteFavoriteError: LocalizedError {
     case openFailed
     case statementFailed
+    case readFailed(code: Int32)
+
+    var errorDescription: String? {
+        switch self {
+        case .openFailed:
+            "Saved favorites could not be opened."
+        case .statementFailed:
+            "Saved favorites could not be accessed. Please try again."
+        case .readFailed:
+            "Saved favorites could not be loaded. Please try again."
+        }
+    }
 }

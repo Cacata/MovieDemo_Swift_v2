@@ -1,3 +1,4 @@
+import Dependencies
 import SwiftUI
 
 struct MoviesPage: View {
@@ -7,9 +8,11 @@ struct MoviesPage: View {
     init(container: AppContainer) {
         self.container = container
         _viewModel = StateObject(
-            wrappedValue: MoviesViewModel(
-                appStateRepository: container.appStateRepository
-            )
+            wrappedValue: withDependencies {
+                $0.movieFeedClient = container.movieFeedClient
+            } operation: {
+                MoviesViewModel(appStateRepository: container.appStateRepository)
+            }
         )
     }
 
@@ -40,6 +43,7 @@ struct MoviesPage: View {
                         NavigationLink(value: movie) {
                             MovieRow(movie: movie)
                         }
+                        .accessibilityIdentifier("movies.row.\(movie.id)")
                         .task { await viewModel.loadNextPageIfNeeded(lastVisibleIndex: index) }
                     }
                 }
