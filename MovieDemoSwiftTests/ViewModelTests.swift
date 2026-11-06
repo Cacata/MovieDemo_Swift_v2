@@ -136,6 +136,78 @@ final class ViewModelTests: XCTestCase {
         XCTAssertNotNil(model.errorMessage)
     }
 
+    func testOverlappingFavoriteAddsKeepPublishedStateInSync() async throws {
+        let favorites = PausedFavoriteRepository()
+        let model = MovieDetailsViewModel(
+            movie: movie(1), movieRepository: FakeMovieRepository(),
+            trailerRepository: FakeTrailerRepository(), favoriteRepository: favorites
+        )
+
+        let first = Task { await model.toggleFavorite() }
+        await favorites.waitForFirstSave()
+        XCTAssertTrue(model.isUpdatingFavorite)
+
+        let second = Task { await model.toggleFavorite() }
+        await second.value
+        let saveCalls = await favorites.saveCalls
+        XCTAssertEqual(saveCalls, 1)
+        XCTAssertFalse(model.isFavorite)
+
+        await favorites.releaseSaves()
+        await first.value
+
+        let persisted = try await favorites.isFavorite(movieID: 1)
+        XCTAssertTrue(persisted)
+        XCTAssertEqual(model.isFavorite, persisted)
+        XCTAssertFalse(model.isUpdatingFavorite)
+    }
+
+    func testLateFavoriteReadDoesNotOverwriteCompletedSave() async {
+        let favorites = SuspendedFavoriteReadRepository()
+        let model = MovieDetailsViewModel(
+            movie: movie(1), movieRepository: FakeMovieRepository(),
+            trailerRepository: FakeTrailerRepository(), favoriteRepository: favorites
+        )
+
+        let loadTask = Task { await model.load() }
+        await favorites.waitForReadStart()
+        XCTAssertFalse(model.isFavorite)
+
+        await model.toggleFavorite()
+        let persistedAfterSave = await favorites.stored
+        XCTAssertTrue(persistedAfterSave)
+        XCTAssertTrue(model.isFavorite)
+
+        await favorites.releaseOldRead(as: false)
+        await loadTask.value
+
+        let persistedAfterRead = await favorites.stored
+        XCTAssertTrue(persistedAfterRead)
+        XCTAssertTrue(model.isFavorite)
+        XCTAssertNil(model.errorMessage)
+    }
+
+    func testFavoriteReadFinishingDuringPendingSaveLeavesFinalStateSaved() async throws {
+        let favorites = PausedFavoriteRepository()
+        let model = MovieDetailsViewModel(
+            movie: movie(1), movieRepository: FakeMovieRepository(),
+            trailerRepository: FakeTrailerRepository(), favoriteRepository: favorites
+        )
+
+        let writeTask = Task { await model.toggleFavorite() }
+        await favorites.waitForFirstSave()
+        await model.load()
+        XCTAssertTrue(model.isUpdatingFavorite)
+
+        await favorites.releaseSaves()
+        await writeTask.value
+
+        let persisted = try await favorites.isFavorite(movieID: 1)
+        XCTAssertTrue(persisted)
+        XCTAssertEqual(model.isFavorite, persisted)
+        XCTAssertFalse(model.isUpdatingFavorite)
+    }
+
     private func makeMoviesModel(
         feed: FakeFeed,
         state: FakeAppStateRepository = FakeAppStateRepository()
@@ -211,6 +283,71 @@ private actor FakeFavoriteRepository: FavoriteRepository {
         ids.insert(movie.id)
     }
     func removeFavorite(movieID: Int) throws { ids.remove(movieID) }
+}
+
+private actor PausedFavoriteRepository: FavoriteRepository {
+    private var ids = Set<Int>()
+    private(set) var saveCalls = 0
+    private var firstSaveWaiter: CheckedContinuation<Void, Never>?
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func favorites() throws -> [Movie] { [] }
+    func isFavorite(movieID: Int) throws -> Bool { ids.contains(movieID) }
+
+    func saveFavorite(_ movie: Movie) async throws {
+        saveCalls += 1
+        firstSaveWaiter?.resume()
+        firstSaveWaiter = nil
+        await withCheckedContinuation { continuation in
+            releaseWaiters.append(continuation)
+        }
+        ids.insert(movie.id)
+    }
+
+    func removeFavorite(movieID: Int) throws { ids.remove(movieID) }
+
+    func waitForFirstSave() async {
+        if saveCalls > 0 { return }
+        await withCheckedContinuation { continuation in
+            firstSaveWaiter = continuation
+        }
+    }
+
+    func releaseSaves() {
+        releaseWaiters.forEach { $0.resume() }
+        releaseWaiters.removeAll()
+    }
+}
+
+private actor SuspendedFavoriteReadRepository: FavoriteRepository {
+    private(set) var stored = false
+    private var pendingRead: CheckedContinuation<Bool, Never>?
+    private var readStartedWaiter: CheckedContinuation<Void, Never>?
+
+    func favorites() throws -> [Movie] { [] }
+
+    func isFavorite(movieID: Int) async throws -> Bool {
+        await withCheckedContinuation { continuation in
+            pendingRead = continuation
+            readStartedWaiter?.resume()
+            readStartedWaiter = nil
+        }
+    }
+
+    func saveFavorite(_ movie: Movie) throws { stored = true }
+    func removeFavorite(movieID: Int) throws { stored = false }
+
+    func waitForReadStart() async {
+        if pendingRead != nil { return }
+        await withCheckedContinuation { continuation in
+            readStartedWaiter = continuation
+        }
+    }
+
+    func releaseOldRead(as value: Bool) {
+        pendingRead?.resume(returning: value)
+        pendingRead = nil
+    }
 }
 
 private struct FakeMovieRepository: MovieRepository {
