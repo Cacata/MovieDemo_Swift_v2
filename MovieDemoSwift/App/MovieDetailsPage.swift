@@ -20,7 +20,10 @@ struct MovieDetailsPage: View {
     var body: some View {
         ThreeRegionPage(
             isFooterVisible: viewModel.errorMessage != nil,
-            headerContent: { Text(viewModel.movie.title).font(.title2).bold() },
+            headerContent: {
+                Text(viewModel.movie.title).font(.title2).bold()
+                    .accessibilityIdentifier("movie.details.\(viewModel.movie.id)")
+            },
             pageContent: {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
@@ -30,6 +33,8 @@ struct MovieDetailsPage: View {
                                 Task { await viewModel.toggleFavorite() }
                             }
                             .buttonStyle(.borderedProminent)
+                            .disabled(viewModel.isUpdatingFavorite)
+                            .accessibilityIdentifier("movie.favorite.toggle")
 
                             Button {
                                 isShareSheetPresented = true
